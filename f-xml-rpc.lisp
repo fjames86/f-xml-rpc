@@ -266,6 +266,8 @@
 
 ;;; decoding support
 
+(defparameter *decode-value-types* nil)
+
 (defun decode-xml-rpc-new-element (name attributes seed)
   (declare (ignore seed name attributes))
   '())
@@ -273,15 +275,31 @@
 (defun decode-xml-rpc-finish-element (name attributes parent-seed seed)
   (declare (ignore attributes))
   (cons (case name
-	  ((:|int| :|i4|) (parse-integer seed))
-	  (:|double| (read-from-string seed))
-	  (:|boolean| (= 1 (parse-integer seed)))
-	  (:|string| (if (null seed) "" seed))
-	  (:|dateTime.iso8601| (xml-rpc-time (iso8601->universal-time seed)))
-	  (:|base64| (if (null seed)
-					 (make-array 0 :element-type '(unsigned-byte 8))
-					 (cl-base64:base64-string-to-usb8-array seed)))
-	  (:|array| (car seed))
+	  ((:|int| :|i4|)
+	   (if *decode-value-type*
+		   :int
+		   (parse-integer seed)))
+	  (:|double|
+		(if *decode-value-types*
+			:double
+			(read-from-string seed)))
+	  (:|boolean|
+		(if *decode-value-type*
+			:boolean
+			(= 1 (parse-integer seed))))
+	  (:|string|
+		(if *decode-value-types*
+			:string
+			(if (null seed) "" seed)))
+	  (:|dateTime.iso8601|
+		(if *decode-value-types*
+			:datetime
+			(xml-rpc-time (iso8601->universal-time seed))))
+	  (:|base64|
+		(if (null seed)
+			(make-array 0 :element-type '(unsigned-byte 8))
+			(cl-base64:base64-string-to-usb8-array seed)))
+	  (:|array|	(car seed))
 	  (:|data| (nreverse seed))  ; potential problem with empty data i.e. <data>\n</data> parsed as "\n"
 	  (:|value| (if (stringp seed) seed (car seed)))
 	  (:|struct| (make-xml-rpc-struct :alist seed))
@@ -362,6 +380,16 @@
 					 (host *xml-rpc-host*) (port *xml-rpc-port*)
 					 (url *xml-rpc-url*) ssl authorization
 					 proxy proxy-basic-authorization)
+  "Call an xml/rpc server with the already encoded method call.
+
+The HOST, PORT and URL of the server. 
+
+Set SSL for communication over https
+
+Set AUTHORIZATION to a 2-element list of username and password to use basic authorization.
+
+See the drakma documentation for using proxy servers, PROXY PROXY-BASIC-AUTHORIZATION"
+
   (let ((uri (format nil "~A://~A:~A~A"
 					 (if ssl "https" "http")
 					 host
@@ -481,7 +509,18 @@
 ;; start the server
 (defun start-xml-rpc-server (&key (port *xml-rpc-port*)
 							 ssl-certificate-file ssl-privatekey-file
+							 ssl-privatekey-password
 							 auth-handler)
+  "Start the Xml/Rpc server on PORT. It will serve any url, not just /RPC2 etc.
+
+If both SSL-CERTIFICATE-FILE and SSL-PRIVATEKEY-FILE are provided, starts
+an ssl server. See the hunchentoot documentation for the meaning of these parameters.
+
+If basic authentication is required, AUTH-HANDLER must be set to a function
+accepting 2 parameters, the username and password provided by the request. It
+should return non-nil on successful authentication.
+"
+  
   (if *xml-rpc-acceptor*
 	  ;; already have a server on this url, error
 	  (error "Server already running. Stop it first")
@@ -493,6 +532,7 @@
 						   :port port
 						   :ssl-certificate-file ssl-certificate-file
 						   :ssl-privatekey-file ssl-privatekey-file
+						   :ssl-privatekey-password ssl-privatekey-password
 						   :auth-handler auth-handler)
 						  
 						  (make-instance
@@ -507,6 +547,7 @@
 ;; stop the server 
 
 (defun stop-xml-rpc-server ()
+  "Stop the xml/rpc server"
   (if *xml-rpc-acceptor*
 	  (progn
 		(hunchentoot:stop *xml-rpc-acceptor*)
@@ -551,6 +592,7 @@
 
 
 (defmacro define-xml-rpc-export (name parameters &body body)
+  "Define a function exported from the server"
   `(defun ,(intern (symbol-name name) :f-xml-rpc-exports)
 	   ,parameters
 	 ,@body))
@@ -560,6 +602,7 @@
 							   (url *xml-rpc-url*)
 							   (port *xml-rpc-port*)
 							   authorization method)
+  "Define a call to a function exported by a server"
   `(defun ,name ,params
      (xml-rpc-call (encode-xml-rpc-call ,(if method method (symbol-name name))
 										,@params)
