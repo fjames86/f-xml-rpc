@@ -1,7 +1,7 @@
 
 (defpackage :f-xml-rpc
   (:use :cl)
-  (:exports #:call-xml-rpc-server
+  (:export #:call-xml-rpc-server
 			#:encode-xml-rpc-call
 			#:xml-rpc-call
 			#:start-xml-rpc-server
