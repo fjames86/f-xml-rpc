@@ -7,7 +7,10 @@
 			#:start-xml-rpc-server
 			#:stop-xml-rpc-server
 			#:xml-rpc-error
-			#:get-xml-rpc-struct-member))
+			#:xml-rpc-struct 
+			#:get-xml-rpc-struct-member
+			#:define-xml-rpc-export
+			#:define-xml-rpc-call))
 
 (defpackage :f-xml-rpc-exports)
 
@@ -551,4 +554,18 @@
   `(defun ,(intern (symbol-name name) :f-xml-rpc-exports)
 	   ,parameters
 	 ,@body))
+
+(defmacro define-xml-rpc-call (name params &key
+							   (host *xml-rpc-host*)
+							   (url *xml-rpc-url*)
+							   (port *xml-rpc-port*)
+							   authorization method)
+  `(defun ,name ,params
+     (xml-rpc-call (encode-xml-rpc-call ,(if method method (symbol-name name))
+										,@params)
+       :url ,url
+       :host ,host
+	   :authorization ,authorization
+       :port ,port)))
+
 
