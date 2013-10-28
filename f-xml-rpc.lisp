@@ -2,15 +2,19 @@
 (defpackage :f-xml-rpc
   (:use :cl)
   (:export #:call-xml-rpc-server
-			#:encode-xml-rpc-call
-			#:xml-rpc-call
-			#:start-xml-rpc-server
-			#:stop-xml-rpc-server
-			#:xml-rpc-error
-			#:xml-rpc-struct 
-			#:get-xml-rpc-struct-member
-			#:define-xml-rpc-export
-			#:define-xml-rpc-call))
+		   #:encode-xml-rpc-call
+		   #:xml-rpc-call
+		   
+		   #:start-xml-rpc-server
+		   #:stop-xml-rpc-server
+		   
+		   #:xml-rpc-error
+		   
+		   #:xml-rpc-struct		   
+		   #:get-xml-rpc-struct-member
+		   
+		   #:define-xml-rpc-export
+		   #:define-xml-rpc-call))
 
 (defpackage :f-xml-rpc-exports)
 
@@ -276,7 +280,7 @@
   (declare (ignore attributes))
   (cons (case name
 	  ((:|int| :|i4|)
-	   (if *decode-value-type*
+	   (if *decode-value-types*
 		   :int
 		   (parse-integer seed)))
 	  (:|double|
@@ -284,7 +288,7 @@
 			:double
 			(read-from-string seed)))
 	  (:|boolean|
-		(if *decode-value-type*
+		(if *decode-value-types*
 			:boolean
 			(= 1 (parse-integer seed))))
 	  (:|string|
