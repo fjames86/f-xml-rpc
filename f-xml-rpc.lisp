@@ -443,9 +443,6 @@ See the drakma documentation for using proxy servers, PROXY PROXY-BASIC-AUTHORIZ
 
 ;;; server API
 
-(defvar *xml-rpc-call-hook* 'execute-xml-rpc-call
-  "A function to execute the xml-rpc call and return the result, accepting a method-name string and a optional argument list")
-
 (defparameter +xml-rpc-method-characters+
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.:/")
 
@@ -453,16 +450,16 @@ See the drakma documentation for using proxy servers, PROXY PROXY-BASIC-AUTHORIZ
   (not (find-if-not (lambda (c) (find c +xml-rpc-method-characters+))
                     method-name)))
 
-(defun find-xml-rpc-method (method-name)
+(defun find-xml-rpc-method (method-name package)
   "Looks for a method with the given name in *xml-rpc-package*,
   except that colons in the name get converted to hyphens."
-  (let ((sym (find-symbol method-name *xml-rpc-package*)))
+  (let ((sym (find-symbol method-name package)))
     (if (fboundp sym) sym nil)))
 
-(defun execute-xml-rpc-call (method-name &rest arguments)
+(defun execute-xml-rpc-call (method-name package &rest arguments)
   "Execute method METHOD-NAME on ARGUMENTS, or raise an error if
   no such method exists in *XML-RPC-PACKAGE*"
-  (let ((method (find-xml-rpc-method method-name)))
+  (let ((method (find-xml-rpc-method method-name package)))
     (if method
         (apply method arguments)
         ;; http://xmlrpc-epi.sourceforge.net/specs/rfc.fault_codes.php
@@ -470,19 +467,55 @@ See the drakma documentation for using proxy servers, PROXY PROXY-BASIC-AUTHORIZ
         (error 'xml-rpc-fault :code -32601
                :string (format nil "Method ~A not found." method-name)))))
 
+(defun handle-xml-rpc-call (encoded package)
+  "Handle an actual call, reading XML from in and returning the
+  XML-encoded result."
+  ;; Try to conform to
+  ;; http://xmlrpc-epi.sourceforge.net/specs/rfc.fault_codes.php
+  (handler-bind ((s-xml:xml-parser-error
+                  #'(lambda (c)
+                      (format-debug (or *xml-rpc-debug-stream* t)
+                                    "Request parsing failed with ~a~%"
+                                    id c)
+                      (return-from handle-xml-rpc-call
+                        ;; -32700 ---> parse error. not well formed
+                        (encode-xml-rpc-fault (format nil "~a" c) -32700))))
+                 (xml-rpc-fault
+                  #'(lambda (c)
+                      (format-debug (or *xml-rpc-debug-stream* t)
+                                    "Call failed with ~a~%" c)
+                      (return-from handle-xml-rpc-call
+                        (encode-xml-rpc-fault (xml-rpc-fault-string c)
+                                              (xml-rpc-fault-code c)))))
+                 (error
+                  #'(lambda (c)
+                      (format-debug (or *xml-rpc-debug-stream* t)
+                                    "Call failed with ~a~%" c)
+                      (return-from handle-xml-rpc-call
+                        ;; -32603 ---> server error. internal xml-rpc error
+                        (encode-xml-rpc-fault (format nil "~a" c) -32603)))))
+	(with-input-from-string (s encoded)
+	  (let ((call (decode-xml-rpc s)))
+		(format-debug (or *xml-rpc-debug-stream* t)
+					  "Received call ~s~%" call)
+		(let ((result (apply #'execute-xml-rpc-call
+							 (first call) package (rest call))))
+		  (format-debug (or *xml-rpc-debug-stream* t)
+						"Call result is ~s~%" result)
+		  (encode-xml-rpc-result result))))))
 
 ;; use hunchentoot for the server
 
 ;; handle the incoming connection
 
-(defparameter *xml-rpc-acceptor* nil)
-
 (defclass xml-rpc-acceptor (hunchentoot:acceptor)
-  ((auth-handler :initarg :auth-handler :initform nil))
+  ((auth-handler :initarg :auth-handler :initform nil)
+   (package :initarg :package :initform *xml-rpc-package*))
   (:default-initargs :address *xml-rpc-host*))
 
 (defclass xml-rpc-ssl-acceptor (hunchentoot:ssl-acceptor)
-  ((auth-handler :initarg :auth-handler :initform nil))
+  ((auth-handler :initarg :auth-handler :initform nil)
+   (package :initarg :package :initform *xml-rpc-package*))
   (:default-initargs :address *xml-rpc-host*))
 
 (defun acceptor-handler (a request)
@@ -495,9 +528,9 @@ See the drakma documentation for using proxy servers, PROXY PROXY-BASIC-AUTHORIZ
 		  (hunchentoot:authorization request)
 		(cond
 		  ((not ahandler)
-		   (handle-xml-rpc-call encoded 0))
+		   (handle-xml-rpc-call encoded (slot-value a 'package)))
 		  ((and username (funcall ahandler username password))
-		   (handle-xml-rpc-call encoded 0))
+		   (handle-xml-rpc-call encoded (slot-value a 'package)))
 		  (t
 		   (setf (hunchentoot:return-code*) hunchentoot:+http-forbidden+)
 		   ""))))))
@@ -511,93 +544,52 @@ See the drakma documentation for using proxy servers, PROXY PROXY-BASIC-AUTHORIZ
   (acceptor-handler a request))
 
 ;; start the server
-(defun start-xml-rpc-server (&key (port *xml-rpc-port*)
-							 ssl-certificate-file ssl-privatekey-file
-							 ssl-privatekey-password
-							 auth-handler)
-  "Start the Xml/Rpc server on PORT. It will serve any url, not just /RPC2 etc.
-
-If both SSL-CERTIFICATE-FILE and SSL-PRIVATEKEY-FILE are provided, starts
-an ssl server. See the hunchentoot documentation for the meaning of these parameters.
-
-If basic authentication is required, AUTH-HANDLER must be set to a function
-accepting 2 parameters, the username and password provided by the request. It
-should return non-nil on successful authentication.
-"
+(defun make-xml-rpc-acceptor (&key (port *xml-rpc-port*)
+							  ssl-certificate-file ssl-privatekey-file
+							  ssl-privatekey-password
+							  auth-handler (package *xml-rpc-package*))
   
-  (if *xml-rpc-acceptor*
-	  ;; already have a server on this url, error
-	  (error "Server already running. Stop it first")
-	  ;; start the server 
-	  (let ((acceptor (if (and ssl-certificate-file ssl-privatekey-file)
-						  ;; ssl
-						  (make-instance
-						   'xml-rpc-ssl-acceptor
-						   :port port
-						   :ssl-certificate-file ssl-certificate-file
-						   :ssl-privatekey-file ssl-privatekey-file
-						   :ssl-privatekey-password ssl-privatekey-password
-						   :auth-handler auth-handler)
-						  
-						  (make-instance
-						   'xml-rpc-acceptor
-						   :port port
-						   :auth-handler auth-handler))))
-		
-		(hunchentoot:start acceptor)
-		(setf *xml-rpc-acceptor* acceptor)
-		acceptor)))
+  (if (and ssl-certificate-file ssl-privatekey-file)
+	  ;; ssl
+	  (make-instance
+	   'xml-rpc-ssl-acceptor
+	   :port port
+	   :ssl-certificate-file ssl-certificate-file
+	   :ssl-privatekey-file ssl-privatekey-file
+	   :ssl-privatekey-password ssl-privatekey-password
+	   :auth-handler auth-handler
+	   :package package)
+	  
+	  (make-instance
+	   'xml-rpc-acceptor
+	   :port port
+	   :auth-handler auth-handler
+	   :package package)))
+
+(defparameter *xml-rpc-acceptor* nil)
+
+(defun start-xml-rpc-server (&optonal acceptor)
+  (if acceptor
+	  (hunchentoot:start acceptor)
+	  (progn
+		(setf *xml-rpc-acceptor* (make-xml-rpc-acceptor))
+		(hunchentoot:start *xml-rpc-acceptor*))))
 	
 ;; stop the server 
 
-(defun stop-xml-rpc-server ()
+(defun stop-xml-rpc-server (&optional acceptor)
   "Stop the xml/rpc server"
-  (if *xml-rpc-acceptor*
+  (if acceptor
+	  (hunchentoot:stop acceptor)
 	  (progn
 		(hunchentoot:stop *xml-rpc-acceptor*)
-		(setf *xml-rpc-acceptor* nil))
-	  (error "No server running")))
+		(setf *xml-rpc-acceptor* nil))))
 
-(defun handle-xml-rpc-call (encoded id)
-  "Handle an actual call, reading XML from in and returning the
-  XML-encoded result."
-  ;; Try to conform to
-  ;; http://xmlrpc-epi.sourceforge.net/specs/rfc.fault_codes.php
-  (handler-bind ((s-xml:xml-parser-error
-                  #'(lambda (c)
-                      (format-debug (or *xml-rpc-debug-stream* t)
-                                    "~a request parsing failed with ~a~%"
-                                    id c)
-                      (return-from handle-xml-rpc-call
-                        ;; -32700 ---> parse error. not well formed
-                        (encode-xml-rpc-fault (format nil "~a" c) -32700))))
-                 (xml-rpc-fault
-                  #'(lambda (c)
-                      (format-debug (or *xml-rpc-debug-stream* t)
-                                    "~a call failed with ~a~%" id c)
-                      (return-from handle-xml-rpc-call
-                        (encode-xml-rpc-fault (xml-rpc-fault-string c)
-                                              (xml-rpc-fault-code c)))))
-                 (error
-                  #'(lambda (c)
-                      (format-debug (or *xml-rpc-debug-stream* t)
-                                    "~a call failed with ~a~%" id c)
-                      (return-from handle-xml-rpc-call
-                        ;; -32603 ---> server error. internal xml-rpc error
-                        (encode-xml-rpc-fault (format nil "~a" c) -32603)))))
-	(with-input-from-string (s encoded)
-	  (let ((call (decode-xml-rpc s)))
-		(format-debug (or *xml-rpc-debug-stream* t)
-					  "~a received call ~s~%" id call)
-		(let ((result (apply *xml-rpc-call-hook* (first call) (rest call))))
-		  (format-debug (or *xml-rpc-debug-stream* t)
-						"~a call result is ~s~%" id result)
-		  (encode-xml-rpc-result result))))))
-
+;; --------- convenience macros --------------
 
 (defmacro define-xml-rpc-export (name parameters &body body)
   "Define a function exported from the server"
-  `(defun ,(intern (symbol-name name) :f-xml-rpc-exports)
+  `(defun ,(intern (symbol-name name) *xml-rpc-package*)
 	   ,parameters
 	 ,@body))
 
