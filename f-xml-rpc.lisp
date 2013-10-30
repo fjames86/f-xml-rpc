@@ -9,7 +9,8 @@
 	   #:make-xml-rpc-server 
 	   #:start-xml-rpc-server
 	   #:stop-xml-rpc-server
-	   
+	   #:export-system-methods 
+
 	   #:xml-rpc-error
 	   
 	   #:xml-rpc-struct		   
