@@ -1,20 +1,23 @@
 
 (defpackage :f-xml-rpc
   (:use :cl)
+  (:nicknames :fxpc)
   (:export #:call-xml-rpc-server
-		   #:encode-xml-rpc-call
-		   #:xml-rpc-call
-		   
-		   #:start-xml-rpc-server
-		   #:stop-xml-rpc-server
-		   
-		   #:xml-rpc-error
-		   
-		   #:xml-rpc-struct		   
-		   #:get-xml-rpc-struct-member
-		   
-		   #:define-xml-rpc-export
-		   #:define-xml-rpc-call))
+	   #:encode-xml-rpc-call
+	   #:xml-rpc-call
+	   
+	   #:make-xml-rpc-server 
+	   #:start-xml-rpc-server
+	   #:stop-xml-rpc-server
+	   
+	   #:xml-rpc-error
+	   
+	   #:xml-rpc-struct		   
+	   #:xml-rpc-struct-member
+	   #:xml-rpc-struct-alist 
+
+	   #:define-xml-rpc-export
+	   #:define-xml-rpc-call))
 
 (defpackage :f-xml-rpc-exports)
 
@@ -145,7 +148,7 @@
 ;  "Get the value of a specific member of an XML-RPC-STRUCT"
 ;  (cdr (assoc member (xml-rpc-struct-alist struct))))
 
-(defun (setf get-xml-rpc-struct-member) (value struct member)
+(defun (setf xml-rpc-struct-member) (value struct member)
   "Set the value of a specific member of an XML-RPC-STRUCT"
   (let ((pair (assoc member (xml-rpc-struct-alist struct))))
     (if pair
@@ -153,7 +156,7 @@
 		(push (cons member value)
 			  (xml-rpc-struct-alist struct)))))
 
-(defun get-xml-rpc-struct-member (struct &rest keys)
+(defun xml-rpc-struct-member (struct &rest keys)
   "Do a deep lookup into the structure"
   (loop with obj = struct
      for key in keys do
@@ -197,16 +200,16 @@
 
 (defun encode-xml-rpc-value (arg stream)
   (princ "<value>" stream)
-  (cond ((or (stringp arg) (symbolp arg))
+  (cond ((or (null arg) (eq arg t))
+	 (princ "<boolean>" stream)
+	 (princ (if arg 1 0) stream)
+	 (princ "</boolean>" stream))
+	((or (stringp arg) (symbolp arg))
 	 (princ "<string>" stream)
 	 (s-xml:print-string-xml (string arg) stream)
 	 (princ "</string>" stream))
 	((integerp arg) (format stream "<int>~d</int>" arg))
-	((floatp arg) (format stream "<double>~f</double>" arg))
-	((or (null arg) (eq arg t))
-	 (princ "<boolean>" stream)
-	 (princ (if arg 1 0) stream)
-	 (princ "</boolean>" stream))
+	((floatp arg) (format stream "<double>~f</double>" arg))	
 	((and (arrayp arg)
 	      (= (array-rank arg) 1)
 	      (subtypep (array-element-type arg)
@@ -312,8 +315,8 @@
 	  (:|params| (nreverse seed))  ; potential problem with empty params <params>\n</params> parsed as "\n"
 	  (:|param| (car seed))
 	  (:|fault| (make-condition 'xml-rpc-fault
-				    :string (get-xml-rpc-struct-member (car seed) :|faultString|)
-				    :code (get-xml-rpc-struct-member (car seed) :|faultCode|)))
+				    :string (xml-rpc-struct-member (car seed) :|faultString|)
+				    :code (xml-rpc-struct-member (car seed) :|faultCode|)))
 	  (:|methodName| seed)
 	  (:|methodCall| (let ((pair (nreverse seed)))
 			   (cons (car pair) (cadr pair))))
@@ -343,39 +346,21 @@
 (defparameter *xml-rpc-host* "localhost"
   "String naming the default XML-RPC host to use")
 
-(defparameter *xml-rpc-port* 80
+(defparameter *xml-rpc-port* 8000
   "Integer specifying the default XML-RPC port to use")
 
 (defparameter *xml-rpc-url* "/RPC2"
   "String specifying the default XML-RPC URL to use")
 
-(defparameter *xml-rpc-agent* (concatenate 'string
-					   (lisp-implementation-type)
-					   " "
-					   (lisp-implementation-version))
-  "String specifying the default XML-RPC agent to include in server responses")
-
 (defvar *xml-rpc-debug* nil
-  "When T the XML-RPC client and server part will be more verbose about their protocol")
-
-(defvar *xml-rpc-debug-stream* nil
-  "When not nil it specifies where debugging output should be written to")
-
-(defparameter *xml-rpc-proxy-host* nil
-  "When not null, a string naming the XML-RPC proxy host to use")
-
-(defparameter *xml-rpc-proxy-port* nil
-  "When not null, an integer specifying the XML-RPC proxy port to use")
+  "When not null is a stream to output debug info")
 
 (defparameter *xml-rpc-package* (find-package :f-xml-rpc-exports)
   "Package for XML-RPC callable functions")
 
-(defparameter *xml-rpc-authorization* nil
-  "When not null, a string to be used as Authorization header")
-
 (defun format-debug (&rest args)
   (when *xml-rpc-debug*
-    (apply #'format args)))
+    (apply #'format *xml-rpc-debug* args)))
 
 
 ;;; client API
@@ -474,34 +459,28 @@ See the drakma documentation for using proxy servers, PROXY PROXY-BASIC-AUTHORIZ
   ;; http://xmlrpc-epi.sourceforge.net/specs/rfc.fault_codes.php
   (handler-bind ((s-xml:xml-parser-error
                   #'(lambda (c)
-                      (format-debug (or *xml-rpc-debug-stream* t)
-                                    "Request parsing failed with ~a~%"
-                                    id c)
+                      (format-debug "Request parsing failed with ~a~%" c)
                       (return-from handle-xml-rpc-call
                         ;; -32700 ---> parse error. not well formed
                         (encode-xml-rpc-fault (format nil "~a" c) -32700))))
                  (xml-rpc-fault
                   #'(lambda (c)
-                      (format-debug (or *xml-rpc-debug-stream* t)
-                                    "Call failed with ~a~%" c)
-                      (return-from handle-xml-rpc-call
+                      (format-debug "Call failed with ~a~%" c)
+		      (return-from handle-xml-rpc-call
                         (encode-xml-rpc-fault (xml-rpc-fault-string c)
                                               (xml-rpc-fault-code c)))))
                  (error
                   #'(lambda (c)
-                      (format-debug (or *xml-rpc-debug-stream* t)
-                                    "Call failed with ~a~%" c)
+                      (format-debug "Call failed with ~a~%" c)
                       (return-from handle-xml-rpc-call
                         ;; -32603 ---> server error. internal xml-rpc error
                         (encode-xml-rpc-fault (format nil "~a" c) -32603)))))
 	(with-input-from-string (s encoded)
 	  (let ((call (decode-xml-rpc s)))
-		(format-debug (or *xml-rpc-debug-stream* t)
-					  "Received call ~s~%" call)
+		(format-debug "Received call ~s~%" call)
 		(let ((result (apply #'execute-xml-rpc-call
 							 (first call) package (rest call))))
-		  (format-debug (or *xml-rpc-debug-stream* t)
-						"Call result is ~s~%" result)
+		  (format-debug "Call result is ~s~%" result)
 		  (encode-xml-rpc-result result))))))
 
 ;; use hunchentoot for the server
@@ -568,11 +547,21 @@ See the drakma documentation for using proxy servers, PROXY PROXY-BASIC-AUTHORIZ
 
 (defparameter *xml-rpc-acceptor* nil)
 
-(defun start-xml-rpc-server (&optonal acceptor)
+(defun start-xml-rpc-server (&key acceptor 
+			       (port *xml-rpc-port*)
+			       ssl-certificate-file ssl-privatekey-file
+			       ssl-privatekey-password
+			       auth-handler (package *xml-rpc-package*))
   (if acceptor
 	  (hunchentoot:start acceptor)
 	  (progn
-		(setf *xml-rpc-acceptor* (make-xml-rpc-acceptor))
+		(setf *xml-rpc-acceptor* 
+		      (make-xml-rpc-acceptor :port port
+					     :ssl-certificate-file ssl-certificate-file
+					     :ssl-privatekey-file ssl-privatekey-file
+					     :ssl-privatekey-password ssl-privatekey-password
+					     :auth-handler auth-handler 
+					     :package package))
 		(hunchentoot:start *xml-rpc-acceptor*))))
 	
 ;; stop the server 
@@ -606,5 +595,36 @@ See the drakma documentation for using proxy servers, PROXY PROXY-BASIC-AUTHORIZ
        :host ,host
 	   :authorization ,authorization
        :port ,port)))
+
+
+
+(defun |system.listMethods| ()
+  (let (exports)
+    (do-symbols (var *xml-rpc-package*)
+      (if (fboundp var)
+	  (push (symbol-name var) exports)))
+    exports))
+
+(defun |system.methodSignature| (method)
+  (let ((fn (find-xml-rpc-method method *xml-rpc-package*)))
+    (if fn
+	(third (function-lambda-expression (symbol-function fn)))
+	(error 'xml-rpc-fault :code -32601
+               :string (format nil "Method ~A not found." method)))))
+
+(defun |system.methodHelp| (method)
+  (let ((fn (find-xml-rpc-method method *xml-rpc-package*)))
+    (if fn
+	(documentation fn 'function)
+	(error 'xml-rpc-fault :code -32601
+               :string (format nil "Method ~A not found." method)))))
+
+(defun export-system-methods (&optional (package *xml-rpc-package*))
+  (loop for sym in '(|system.listMethods| |system.methodSignature| |system.methodHelp|)
+       do (handler-case (import sym package)
+	    (package-error () 
+	      (format-debug "Unable to import ~S to package ~S" sym package)))))
+
+
 
 
