@@ -12,8 +12,10 @@
 	   #:export-system-methods 
 
 	   #:xml-rpc-error
-	   
-	   #:xml-rpc-struct		   
+
+	   #:make-xml-rpc-struct
+	   #:xml-rpc-struct
+	   #:xml-rpc-struct-p
 	   #:xml-rpc-struct-member
 	   #:xml-rpc-struct-alist 
 
