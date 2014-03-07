@@ -396,6 +396,11 @@ See the drakma documentation for using proxy servers, PROXY PROXY-BASIC-AUTHORIZ
 							 :proxy proxy
 							 :proxy-basic-authorization proxy-basic-authorization)
 	  (declare (ignore ruri headers stream must-close))
+	  ;; if the response comes in as an array of char codes then 
+	  ;; convert it to a string
+	  (when (arrayp body)
+	    (setf body (map 'string #'code-char body)))
+
 	  (if (= status-code 200)
 		  (with-input-from-string (bstream body)
 			(let ((decoded (decode-xml-rpc bstream)))
