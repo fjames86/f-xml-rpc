@@ -148,26 +148,26 @@
   (format stream "#<XML-RPC-STRUCT :KEYS ~S>"
 		  (mapcar #'car (xml-rpc-struct-alist xml-element))))
 
-										;(defun get-xml-rpc-struct-member (struct member)
-										;  "Get the value of a specific member of an XML-RPC-STRUCT"
-										;  (cdr (assoc member (xml-rpc-struct-alist struct))))
-
-(defun (setf xml-rpc-struct-member) (value struct member)
+(defun (setf xml-rpc-struct-member) (value struct &rest keys)
   "Set the value of a specific member of an XML-RPC-STRUCT"
-  (let ((pair (assoc member (xml-rpc-struct-alist struct))))
-    (if pair
-		(setf (cdr pair) value)
-		(push (cons member value)
-			  (xml-rpc-struct-alist struct)))))
+  (do ((keys keys (cdr keys))
+       (obj struct (if (integerp (car keys))
+		       (elt obj (car keys))
+		       (cdr (assoc (car keys) (xml-rpc-struct-alist obj))))))
+      ((null (cdr keys))
+       (if (integerp (car keys))
+	   (setf (elt obj (car keys)) value)
+	   (setf (cdr (assoc (car keys) (xml-rpc-struct-alist obj))) value))))
+  value)
 
 (defun xml-rpc-struct-member (struct &rest keys)
-  "Do a deep lookup into the structure"
-  (loop with obj = struct
-     for key in keys do
-       (if (integerp key)
-		   (setf obj (elt obj key))
-		   (setf obj (cdr (assoc key (xml-rpc-struct-alist obj)))))
-	 finally (return obj)))
+  "Find a member of a structure."
+  (do ((keys keys (cdr keys))
+       (obj struct (let ((key (car keys)))
+		     (if (integerp key)
+			 (elt obj key)
+			 (cdr (assoc key (xml-rpc-struct-alist obj)))))))
+      ((null keys) obj)))
 
 (defun xml-rpc-struct (&rest args)
   "Create a new XML-RPC-STRUCT from the arguments: alternating member names and values"
