@@ -505,7 +505,7 @@ See the drakma documentation for using proxy servers, PROXY PROXY-BASIC-AUTHORIZ
 (defclass xml-rpc-acceptor (hunchentoot:acceptor)
   ((auth-handler :initarg :auth-handler :initform nil)
    (package :initarg :package :initform *xml-rpc-package*))
-  (:default-initargs :address nil )
+  (:default-initargs :address nil))
 
 (defclass xml-rpc-ssl-acceptor (hunchentoot:ssl-acceptor)
   ((auth-handler :initarg :auth-handler :initform nil)
