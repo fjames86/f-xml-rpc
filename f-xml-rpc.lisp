@@ -372,7 +372,7 @@
 (defun xml-rpc-call (encoded &key
 					 (host *xml-rpc-host*) (port *xml-rpc-port*)
 					 (url *xml-rpc-url*) ssl authorization
-					 proxy proxy-basic-authorization)
+					 proxy proxy-basic-authorization (close t))
   "Call an xml/rpc server with the already encoded method call.
 
 The HOST, PORT and URL of the server. 
@@ -391,12 +391,14 @@ See the drakma documentation for using proxy servers, PROXY PROXY-BASIC-AUTHORIZ
 	(multiple-value-bind (body status-code headers ruri stream
 							   must-close reason-phrase)
 		(drakma:http-request uri
+				     :close close
 							 :method :post
 							 :content encoded
 							 :basic-authorization authorization
 							 :proxy proxy
 							 :proxy-basic-authorization proxy-basic-authorization)
-	  (declare (ignore ruri headers stream must-close))
+	  (declare (ignore ruri stream headers must-close))
+;;	  (format *standard-output* "~S~%" headers)
 	  ;; if the response comes in as an array of char codes then 
 	  ;; convert it to a string
 	  (when (and (not (stringp body)) (arrayp body))
@@ -503,32 +505,34 @@ See the drakma documentation for using proxy servers, PROXY PROXY-BASIC-AUTHORIZ
 (defclass xml-rpc-acceptor (hunchentoot:acceptor)
   ((auth-handler :initarg :auth-handler :initform nil)
    (package :initarg :package :initform *xml-rpc-package*))
-  (:default-initargs :address *xml-rpc-host*))
+  (:default-initargs :address nil )
 
 (defclass xml-rpc-ssl-acceptor (hunchentoot:ssl-acceptor)
   ((auth-handler :initarg :auth-handler :initform nil)
    (package :initarg :package :initform *xml-rpc-package*))
-  (:default-initargs :address *xml-rpc-host*))
+  (:default-initargs :address nil))
 
 (defvar *authorization* nil)
 
 (defun acceptor-handler (a request)
+  (format *standard-output* "headers in: ~S~%" (hunchentoot:headers-in* request))
   (let ((encoded (map 'string #'code-char
-					  (hunchentoot:raw-post-data))))
-	(setf (hunchentoot:content-type*) "text/xml")
-	;; check authorization
-	(let ((ahandler (slot-value a 'auth-handler)))
-	  (multiple-value-bind (username password)
-		  (hunchentoot:authorization request)
-		(cond
-		  ((not ahandler)
-		   (handle-xml-rpc-call encoded (slot-value a 'package)))
-		  ((and username (funcall ahandler username password))
-		   (let ((*authorization* (list username password)))
-			 (handle-xml-rpc-call encoded (slot-value a 'package))))
-		  (t
-		   (setf (hunchentoot:return-code*) hunchentoot:+http-forbidden+)
-		   ""))))))
+		      (hunchentoot:raw-post-data))))
+    (setf (hunchentoot:content-type*) "text/xml")
+    ;; check authorization
+    (let ((ahandler (slot-value a 'auth-handler)))
+      (multiple-value-bind (username password)
+	  (hunchentoot:authorization request)
+	(cond
+	  ((not ahandler)
+	   (handle-xml-rpc-call encoded (slot-value a 'package)))
+	  ((and username (funcall ahandler username password))
+	   (let ((*authorization* (list username password)))
+	     (handle-xml-rpc-call encoded (slot-value a 'package))))
+	  (t
+	   (setf (hunchentoot:return-code*) hunchentoot:+http-forbidden+)
+	   ""))))))
+
 
 (defmethod hunchentoot:acceptor-dispatch-request
 	((a xml-rpc-acceptor) request)
@@ -553,8 +557,7 @@ See the drakma documentation for using proxy servers, PROXY PROXY-BASIC-AUTHORIZ
 	   :ssl-privatekey-file ssl-privatekey-file
 	   :ssl-privatekey-password ssl-privatekey-password
 	   :auth-handler auth-handler
-	   :package package)
-	  
+	   :package package)	  
 	  (make-instance
 	   'xml-rpc-acceptor
 	   :port port
