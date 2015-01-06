@@ -14,7 +14,7 @@
   :components
   ((:file "f-xml-rpc"))
   
-  :depends-on (:drakma :hunchentoot :s-xml))
+  :depends-on (:drakma :hunchentoot :s-xml :ntlm))
 
 
 

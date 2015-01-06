@@ -1,6 +1,6 @@
 
 (defpackage :f-xml-rpc
-  (:use :cl)
+  (:use :cl :ntlm)
   (:nicknames :fxpc)
   (:export #:call-xml-rpc-server
 		   #:encode-xml-rpc-call
@@ -21,7 +21,12 @@
 		   #:xml-rpc-struct-alist 
 		   
 		   #:define-xml-rpc-export
-		   #:define-xml-rpc-call))
+		   #:define-xml-rpc-call
+
+           #:struct-member
+           #:call
+           #:encode
+           #:call*))
 
 (defpackage :f-xml-rpc-exports)
 
@@ -166,7 +171,7 @@
        (obj struct (let ((key (car keys)))
 		     (if (integerp key)
 			 (elt obj key)
-			 (cdr (assoc key (xml-rpc-struct-alist obj)))))))
+			 (cdr (assoc key (xml-rpc-struct-alist obj) :test #'string-equal))))))
       ((null keys) obj)))
 
 (defun xml-rpc-struct (&rest args)
@@ -285,7 +290,7 @@
 
 (defun decode-xml-rpc-finish-element (name attributes parent-seed seed)
   (declare (ignore attributes))
-  (cons (case name
+  (cons (ecase name
 		  ((:|int| :|i4|)
 		   (if *decode-value-types*
 			   :int
@@ -369,10 +374,105 @@
 
 ;;; client API
 
-(defun xml-rpc-call (encoded &key
-					 (host *xml-rpc-host*) (port *xml-rpc-port*)
-					 (url *xml-rpc-url*) ssl authorization
-					 proxy proxy-basic-authorization (close t))
+(defun b64-usb8 (string)
+  "Base64 string to (unsigned-byte 8) array"
+  (cl-base64:base64-string-to-usb8-array string))
+
+(defun usb8-b64 (usb8)
+  "(unsigned-byte 8) array to Base64 string"
+  (cl-base64:usb8-array-to-base64-string usb8))
+
+(defun authorization-header (msg)
+  "Format an AUTHORIZATION http header"
+  (format nil "NTLM ~A" (cl-base64:usb8-array-to-base64-string msg)))
+
+(defun authorization-msg (auth-header)  
+  "Extract the binary message from the AUTHORIZATION header"
+  (let ((matches (nth-value 1 (cl-ppcre:scan-to-strings "NTLM ([\\w=\\+/]+)" auth-header))))
+    (when (and matches (> (length matches) 0))
+      (b64-usb8 (elt matches 0)))))
+
+
+;; http://msdn.microsoft.com/en-us/library/cc236676.aspx
+(defun generate-reply (challenge username domain computer-name password-md4 version)
+  "Generate an AUTHENTICATE message from the challenge"
+  (format t "challenge: ~S~%" challenge)
+  (let* ((lmowf (lmowf-v2 username domain password-md4))
+         (ntowf (ntowf-v2 username domain password-md4))
+         (server-challenge (cdr (assoc :server-challenge challenge)))
+         (client-challenge (client-challenge))
+         (time (cdr (assoc :timestamp (cdr (assoc :target-info challenge)))))
+         (target-info-buffer (cdr (assoc :target-info-buffer challenge)))
+         (temp (make-temp time client-challenge target-info-buffer))
+         (lm-response (lm-response-v2 lmowf server-challenge client-challenge))
+         (nt-response (nt-response-v2 ntowf
+                                      server-challenge
+                                      temp))
+         (session-base-key (session-base-key-v2 ntowf 
+                                                server-challenge
+                                                temp))
+         (key-exchange-key (key-exchange-key session-base-key
+                                             lm-response
+                                             server-challenge
+                                             lmowf))
+         (exported-session-key (exported-session-key :negotiate-key-exch t
+                                                     :key-exchange-key key-exchange-key)))
+    (pack-authenticate-message (cdr (assoc :flags challenge))
+                               :lm-response lm-response
+                               :nt-response nt-response
+                               :domain domain
+                               :username username 
+                               :workstation computer-name
+                               :encrypted-session-key
+                               (encrypted-session-key key-exchange-key exported-session-key)
+                               :version version)))
+
+(defun ntlm-http-request (uri keyword-args &key username domain password-md4 workstation version)
+  "Perform an HTTP request with NTLM authentication"
+  (multiple-value-bind (content status-code headers ruri stream must-close reason)
+      (apply #'drakma:http-request 
+             uri
+             :close nil
+             :keep-alive t
+             :additional-headers 
+             `((:authorization . ,(authorization-header 
+                                   (pack-negotiate-message '(:NEGOTIATE-UNICODE
+                                                             :NEGOTIATE-OEM 
+                                                             :REQUEST-TARGET
+                                                             :NEGOTIATE-NTLM
+                                                             :NEGOTIATE-OEM-DOMAIN-SUPPLIED
+                                                             :NEGOTIATE-OEM-WORKSTATION-SUPPLIED
+                                                             :NEGOTIATE-ALWAYS-SIGN
+                                                             :NEGOTIATE-EXTENDED-SESSIONSECURITY
+                                                             :NEGOTIATE-VERSION 
+                                                             :NEGOTIATE-128
+                                                             :NEGOTIATE-56)
+                                                           :workstation workstation
+                                                           :domain domain
+                                                           :version version))))
+             keyword-args)
+    (declare (ignore content ruri must-close reason)) ;; status-code))
+    (format t "status-code: ~S~%" status-code)
+    (let ((msg (authorization-msg (cdr (assoc :www-authenticate headers)))))
+      (hd msg)
+      (if msg
+	  (apply #'drakma:http-request 
+		 uri 
+		 :stream stream
+		 :additional-headers 
+		 `((:authorization . ,(authorization-header
+				       (generate-reply (unpack-challenge-message msg) 
+						       username domain workstation password-md4 version))))
+		 keyword-args)
+	  (error "No CHALLENGE response")))))
+
+(defun xml-rpc-call (encoded 
+                     &key
+                       uri
+                       (host *xml-rpc-host*) (port *xml-rpc-port*)
+                       (url *xml-rpc-url*) 
+                       ssl authorization ntlm-authorization
+                       proxy proxy-basic-authorization (close t))
   "Call an xml/rpc server with the already encoded method call.
 
 The HOST, PORT and URL of the server. 
@@ -381,22 +481,42 @@ Set SSL to T for communication over https.
 
 Set AUTHORIZATION to a 2-element list of username and password to use basic authorization.
 
+NTLM-AUTHORIZATION to a keyword list (&key username domain password workstation version).
+Password can be either the md4 hash of the plaintext password, or a string (which gets automatically hashed
+before use). Version should be either nil or the result of (make-ntlm-version).
+
 See the drakma documentation for using proxy servers, PROXY PROXY-BASIC-AUTHORIZATION"
 
-  (let ((uri (format nil "~A://~A:~A~A"
-					 (if ssl "https" "http")
-					 host
-					 port
-					 url)))
+  (let ((uri (if uri 
+                 uri
+                 (format nil "~A://~A:~A~A"
+                         (if ssl "https" "http")
+                         host
+                         port
+                         url))))
 	(multiple-value-bind (body status-code headers ruri stream
 							   must-close reason-phrase)
-		(drakma:http-request uri
-				     :close close
-							 :method :post
-							 :content encoded
-							 :basic-authorization authorization
-							 :proxy proxy
-							 :proxy-basic-authorization proxy-basic-authorization)
+        (if ntlm-authorization
+            (destructuring-bind (&key username domain password workstation version) ntlm-authorization
+              (ntlm-http-request uri 
+                                 (list :content encoded
+                                       :method :post
+                                       :proxy proxy
+                                       :proxy-basic-authorization proxy-basic-authorization)
+                                 :username username
+                                 :domain domain
+                                 :password-md4 (if (stringp password)
+                                                   (password-md4 password)
+                                                   password)
+                                 :version (if version version (make-ntlm-version 6 1 2600))
+                                 :workstation workstation))
+            (drakma:http-request uri
+                                 :close close
+                                 :method :post
+                                 :content encoded
+                                 :basic-authorization authorization
+                                 :proxy proxy
+                                 :proxy-basic-authorization proxy-basic-authorization))
 	  (declare (ignore ruri stream headers must-close))
 ;;	  (format *standard-output* "~S~%" headers)
 	  ;; if the response comes in as an array of char codes then 
@@ -407,7 +527,7 @@ See the drakma documentation for using proxy servers, PROXY PROXY-BASIC-AUTHORIZ
 									  (code-char c)
 									  c))
 						body)))
-
+	  (format-debug "body: ~S~%" body)
 	  (if (= status-code 200)
 		  (with-input-from-string (bstream body)
 			(let ((decoded (decode-xml-rpc bstream)))
@@ -511,6 +631,15 @@ See the drakma documentation for using proxy servers, PROXY PROXY-BASIC-AUTHORIZ
   ((auth-handler :initarg :auth-handler :initform nil)
    (package :initarg :package :initform *xml-rpc-package*))
   (:default-initargs :address nil))
+
+(defmethod hunchentoot:reset-connection-stream ((acceptor xml-rpc-acceptor) stream)
+  (setf hunchentoot::*close-hunchentoot-stream* t)
+  (call-next-method))
+
+(defmethod hunchentoot:reset-connection-stream ((acceptor xml-rpc-ssl-acceptor) stream)
+  (setf hunchentoot::*close-hunchentoot-stream* t)
+  (call-next-method))
+
 
 (defvar *authorization* nil)
 
@@ -647,3 +776,28 @@ See the drakma documentation for using proxy servers, PROXY PROXY-BASIC-AUTHORIZ
 
 
 
+
+
+;; -----------
+
+;; some wrappers to make certain calls easier
+(defun struct-member (struct &rest keys)
+  (apply #'xml-rpc-struct-member struct keys))
+
+(defun call (encoded &key uri authorization ntlm-authorization)
+  (xml-rpc-call encoded 
+                :uri uri
+                :authorization authorization 
+                :ntlm-authorization ntlm-authorization))
+
+(defun encode (name &rest args)
+  (apply #'encode-xml-rpc-call name args))
+
+(defmacro call* ((&key uri authorization ntlm-authorization) name &rest args)
+  "Sugar coating"
+  `(call (encode ,name ,@args)
+         :uri ,uri
+         :authorization ,authorization 
+         :ntlm-authorization ,ntlm-authorization))
+
+  
