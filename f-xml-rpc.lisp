@@ -397,34 +397,34 @@
 (defun generate-reply (challenge username domain computer-name password-md4 version)
   "Generate an AUTHENTICATE message from the challenge"
   (format t "challenge: ~S~%" challenge)
-  (let* ((lmowf (lmowf-v2 username domain password-md4))
-         (ntowf (ntowf-v2 username domain password-md4))
+  (let* ((lmowf (ntlm::lmowf-v2 username domain password-md4))
+         (ntowf (ntlm::ntowf-v2 username domain password-md4))
          (server-challenge (cdr (assoc :server-challenge challenge)))
-         (client-challenge (client-challenge))
+         (client-challenge (ntlm::client-challenge))
          (time (cdr (assoc :timestamp (cdr (assoc :target-info challenge)))))
          (target-info-buffer (cdr (assoc :target-info-buffer challenge)))
-         (temp (make-temp time client-challenge target-info-buffer))
-         (lm-response (lm-response-v2 lmowf server-challenge client-challenge))
-         (nt-response (nt-response-v2 ntowf
+         (temp (ntlm::make-temp time client-challenge target-info-buffer))
+         (lm-response (ntlm::lm-response-v2 lmowf server-challenge client-challenge))
+         (nt-response (ntlm::nt-response-v2 ntowf
                                       server-challenge
                                       temp))
-         (session-base-key (session-base-key-v2 ntowf 
+         (session-base-key (ntlm::session-base-key-v2 ntowf 
                                                 server-challenge
                                                 temp))
-         (key-exchange-key (key-exchange-key session-base-key
+         (key-exchange-key (ntlm::key-exchange-key session-base-key
                                              lm-response
                                              server-challenge
                                              lmowf))
-         (exported-session-key (exported-session-key :negotiate-key-exch t
+         (exported-session-key (ntlm::exported-session-key :negotiate-key-exch t
                                                      :key-exchange-key key-exchange-key)))
-    (pack-authenticate-message (cdr (assoc :flags challenge))
+    (ntlm::pack-authenticate-message (cdr (assoc :flags challenge))
                                :lm-response lm-response
                                :nt-response nt-response
                                :domain domain
                                :username username 
                                :workstation computer-name
                                :encrypted-session-key
-                               (encrypted-session-key key-exchange-key exported-session-key)
+                               (ntlm::encrypted-session-key key-exchange-key exported-session-key)
                                :version version)))
 
 (defun ntlm-http-request (uri keyword-args &key username domain password-md4 workstation version)
@@ -436,7 +436,7 @@
              :keep-alive t
              :additional-headers 
              `((:authorization . ,(authorization-header 
-                                   (pack-negotiate-message '(:NEGOTIATE-UNICODE
+                                   (ntlm::pack-negotiate-message '(:NEGOTIATE-UNICODE
                                                              :NEGOTIATE-OEM 
                                                              :REQUEST-TARGET
                                                              :NEGOTIATE-NTLM
@@ -454,14 +454,13 @@
     (declare (ignore content ruri must-close reason)) ;; status-code))
     (format t "status-code: ~S~%" status-code)
     (let ((msg (authorization-msg (cdr (assoc :www-authenticate headers)))))
-      (hd msg)
       (if msg
 	  (apply #'drakma:http-request 
 		 uri 
 		 :stream stream
 		 :additional-headers 
 		 `((:authorization . ,(authorization-header
-				       (generate-reply (unpack-challenge-message msg) 
+				       (generate-reply (ntlm::unpack-challenge-message msg) 
 						       username domain workstation password-md4 version))))
 		 keyword-args)
 	  (error "No CHALLENGE response")))))
@@ -506,9 +505,9 @@ See the drakma documentation for using proxy servers, PROXY PROXY-BASIC-AUTHORIZ
                                  :username username
                                  :domain domain
                                  :password-md4 (if (stringp password)
-                                                   (password-md4 password)
+                                                   (ntlm::password-md4 password)
                                                    password)
-                                 :version (if version version (make-ntlm-version 6 1 2600))
+                                 :version (if version version (ntlm::make-ntlm-version 6 1 2600))
                                  :workstation workstation))
             (drakma:http-request uri
                                  :close close
